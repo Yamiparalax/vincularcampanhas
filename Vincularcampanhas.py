@@ -9,8 +9,8 @@ import pandas as pd
 import polars as pl
 import pythoncom
 from win32com.client import Dispatch
-from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QHBoxLayout
-from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QDateEdit
+from PySide6.QtCore import QSettings, QDate
 from playwright.sync_api import sync_playwright, Page, BrowserContext, expect, TimeoutError as PWTimeoutError
 
 for sp in site.getsitepackages():
@@ -30,6 +30,7 @@ NOME_SERVIDOR = "Servidor.py"
 NOME_AUTOMACAO = "strauss"
 HEADLESS = False
 REGRAVAREXCEL = True
+DATA_ESPECIFICA = False
 ENVIAR_EMAIL_FALHA = ["carlos.lsilva@c6bank.com","sofia.fernandes@c6bank.com"]
 BQ_PROJECT_ID = "datalab-pagamentos"
 BQ_SOURCE_PROJECT_ID = "c6-banco-comercial-analytics"
@@ -276,6 +277,30 @@ def coletar_contexto_manual(amb:Ambiente)->Tuple[str,str,str]:
     obs="AUTO" if modo=="AUTO" else (le_obs.text().strip() or "Solicitacao da área")
     usr=le_usr.text().strip() or amb.usuario
     return modo,obs,usr
+
+def selecionar_data_especifica(amb:Ambiente)->Optional[str]:
+    app=QApplication.instance() or QApplication(sys.argv)
+    dlg=QDialog(); dlg.setWindowTitle("Selecionar Data de Corte")
+    layout=QVBoxLayout(dlg)
+    layout.addWidget(QLabel("Escolha a data de corte:"))
+    de=QDateEdit(); de.setCalendarPopup(True); de.setDate(QDate.currentDate())
+    layout.addWidget(de)
+    btns=QHBoxLayout(); layout.addLayout(btns)
+    ok_btn=QPushButton("OK"); ok_btn.clicked.connect(dlg.accept); btns.addWidget(ok_btn)
+    cancel_btn=QPushButton("Cancelar"); cancel_btn.clicked.connect(dlg.reject); btns.addWidget(cancel_btn)
+    if not dlg.exec():
+        amb.logger.info("Seleção de data cancelada")
+        return None
+    selected=de.date().toPython()
+    try:
+        out=selected.strftime("%Y-%m-%d")
+    except Exception:
+        out=None
+    if out:
+        amb.logger.info("Data selecionada: %s", out)
+    else:
+        amb.logger.warning("Data inválida selecionada")
+    return out
 
 def _get_access_token()->str:
     tok=os.getenv("GCP_ACCESS_TOKEN") or os.getenv("BQ_TOKEN")
@@ -631,6 +656,10 @@ def main()->int:
     parser.add_argument("--no-baixar",action="store_false",dest="baixar")
     args,unknown=parser.parse_known_args()
     data_corte=args.param
+    if DATA_ESPECIFICA and not servidor:
+        escolhida=selecionar_data_especifica(amb)
+        if escolhida:
+            data_corte=escolhida
     tempo=""
     try:
         status_code,total,resultado,resumo=vincular_campanhas(amb,baixar=args.baixar,data_corte=data_corte)
