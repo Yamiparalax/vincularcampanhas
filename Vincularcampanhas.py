@@ -9,8 +9,8 @@ import pandas as pd
 import polars as pl
 import pythoncom
 from win32com.client import Dispatch
-from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QHBoxLayout
-from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QCalendarWidget, QDialogButtonBox
+from PySide6.QtCore import QSettings, QDate
 from playwright.sync_api import sync_playwright, Page, BrowserContext, expect, TimeoutError as PWTimeoutError
 
 for sp in site.getsitepackages():
@@ -34,6 +34,7 @@ ENVIAR_EMAIL_FALHA = ["carlos.lsilva@c6bank.com","sofia.fernandes@c6bank.com"]
 BQ_PROJECT_ID = "datalab-pagamentos"
 BQ_SOURCE_PROJECT_ID = "c6-banco-comercial-analytics"
 BQ_LOCATION = "US"
+DATA_ESPECIFICA = False
 RET_SUCESSO = 0
 RET_FALHA = 1
 RET_SEM_DADOS = 2
@@ -276,6 +277,40 @@ def coletar_contexto_manual(amb:Ambiente)->Tuple[str,str,str]:
     obs="AUTO" if modo=="AUTO" else (le_obs.text().strip() or "Solicitacao da área")
     usr=le_usr.text().strip() or amb.usuario
     return modo,obs,usr
+
+class DataDialog(QDialog):
+    def __init__(self,data_padrao:Optional[str]=None):
+        super().__init__()
+        self.setWindowTitle("Selecionar data de corte")
+        layout=QVBoxLayout(self)
+        layout.addWidget(QLabel("Selecione a data de corte"))
+        self.calendar=QCalendarWidget()
+        if data_padrao:
+            dt=QDate.fromString(data_padrao,"yyyy-MM-dd")
+            if dt.isValid():
+                self.calendar.setSelectedDate(dt)
+        layout.addWidget(self.calendar)
+        btns=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+    def data_escolhida(self)->str:
+        return self.calendar.selectedDate().toString("yyyy-MM-dd")
+
+def obter_data_especifica(valor_inicial:Optional[str])->Optional[str]:
+    app=QApplication.instance()
+    created=False
+    if app is None:
+        app=QApplication(sys.argv)
+        created=True
+    dlg=DataDialog(valor_inicial)
+    if dlg.exec():
+        data=dlg.data_escolhida()
+    else:
+        data=None
+    if created and app:
+        app.quit()
+    return data
 
 def _get_access_token()->str:
     tok=os.getenv("GCP_ACCESS_TOKEN") or os.getenv("BQ_TOKEN")
@@ -629,8 +664,16 @@ def main()->int:
     parser.add_argument("command",nargs="?",choices=["vincular"],default="vincular")
     parser.add_argument("param",nargs="?")
     parser.add_argument("--no-baixar",action="store_false",dest="baixar")
+    parser.add_argument("--data-especifica",action="store_true",default=DATA_ESPECIFICA,dest="data_especifica")
     args,unknown=parser.parse_known_args()
     data_corte=args.param
+    if args.data_especifica:
+        selecionada=obter_data_especifica(data_corte or date.today().isoformat())
+        if selecionada:
+            data_corte=selecionada
+            amb.logger.info("Data específica selecionada: %s", data_corte)
+        else:
+            amb.logger.info("Data específica não selecionada; seguindo padrão")
     tempo=""
     try:
         status_code,total,resultado,resumo=vincular_campanhas(amb,baixar=args.baixar,data_corte=data_corte)
