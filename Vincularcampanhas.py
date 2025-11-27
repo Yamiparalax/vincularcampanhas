@@ -12,7 +12,7 @@ import pythoncom
 from win32com.client import Dispatch
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QDateEdit
 from PySide6.QtCore import QSettings, QDate
-from playwright.sync_api import sync_playwright, Page, BrowserContext, expect, TimeoutError as PWTimeoutError
+from playwright.sync_api import sync_playwright, Page, BrowserContext, TimeoutError as PWTimeoutError
 
 for sp in site.getsitepackages():
     if sp not in sys.path:
@@ -32,6 +32,7 @@ NOME_SCRIPT = ARQUIVO_ATUAL.stem.upper()
 STEM = ARQUIVO_ATUAL.stem.lower()
 NOME_SERVIDOR = "Servidor.py"
 NOME_AUTOMACAO = "strauss"
+HEADLESS = False
 NAVEGADOR_ESCONDIDO = False
 REGRAVAREXCEL = False
 DATA_ESPECIFICA = False
