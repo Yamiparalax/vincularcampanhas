@@ -23,21 +23,24 @@ from dollynho import get_credencial
 from _utilAutomacoesExec import AutomacoesExecClient
 
 TZ = ZoneInfo("America/Sao_Paulo")
+INICIO_EXEC_SP = datetime.now(TZ)
+DATA_EXEC = INICIO_EXEC_SP.strftime("%Y-%m-%d")
+HORA_EXEC = INICIO_EXEC_SP.strftime("%H:%M:%S")
 ARQUIVO_ATUAL = Path(__file__).resolve()
 NOME_SCRIPT = ARQUIVO_ATUAL.stem.upper()
 STEM = ARQUIVO_ATUAL.stem.lower()
 NOME_SERVIDOR = "Servidor.py"
 NOME_AUTOMACAO = "strauss"
-HEADLESS = False
-REGRAVAREXCEL = True
+NAVEGADOR_ESCONDIDO = False
+REGRAVAREXCEL = False
 DATA_ESPECIFICA = False
 ENVIAR_EMAIL_FALHA = ["carlos.lsilva@c6bank.com","sofia.fernandes@c6bank.com"]
 BQ_PROJECT_ID = "datalab-pagamentos"
 BQ_SOURCE_PROJECT_ID = "c6-banco-comercial-analytics"
 BQ_LOCATION = "US"
-RET_SUCESSO = 0
-RET_FALHA = 1
-RET_SEM_DADOS = 2
+RETCODE_SUCESSO = 0
+RETCODE_FALHA = 1
+RETCODE_SEMDADOSPARAPROCESSAR = 2
 
 X_RD_LOGIN_USUARIO={"css":"#login"}
 X_RD_LOGIN_SENHA={"css":"#password"}
@@ -50,16 +53,49 @@ X_RD_INTERSTITIAL={"css":"#main-frame-error"}
 X_RD_BTN_LOG={"css":"#btn_view_output"}
 X_RD_LOG_TEXT={"css":"span.execution-log__content-text"}
 
+class Execucao:
+    def __init__(self):
+        self.modo_execucao="AUTO"
+        self.observacao="AUTO"
+        self.usuario=f"{getpass.getuser()}@c6bank.com"
+    def is_servidor(self)->bool:
+        return len(sys.argv)>1 or os.getenv("SERVIDOR_ORIGEM") or os.getenv("MODO_EXECUCAO")
+    def abrir_gui(self,amb:"Ambiente")->Tuple[str,str,str]:
+        app=QApplication.instance() or QApplication(sys.argv)
+        dlg=QDialog(); dlg.setWindowTitle("Contexto de Execução")
+        layout=QVBoxLayout(dlg)
+        hb=QHBoxLayout(); layout.addLayout(hb)
+        hb.addWidget(QLabel("MODO:"))
+        cb=QComboBox(); cb.addItems(["AUTO","SOLICITACAO"]); hb.addWidget(cb)
+        layout.addWidget(QLabel("OBSERVAÇÃO:"))
+        le_obs=QLineEdit(); layout.addWidget(le_obs)
+        layout.addWidget(QLabel("USUÁRIO (E-MAIL):"))
+        le_usr=QLineEdit(); le_usr.setText(amb.usuario); layout.addWidget(le_usr)
+        btn=QPushButton("OK"); btn.clicked.connect(dlg.accept); layout.addWidget(btn)
+        if not dlg.exec():
+            return "AUTO","AUTO",amb.usuario
+        modo=cb.currentText().upper()
+        obs="AUTO" if modo=="AUTO" else (le_obs.text().strip() or "SOLICITACAO")
+        usr=le_usr.text().strip() or amb.usuario
+        return modo,obs,usr
+    def detectar(self,amb:"Ambiente")->Tuple[str,str,str]:
+        if self.is_servidor():
+            return "AUTO","AUTO",self.usuario
+        try:
+            return self.abrir_gui(amb)
+        except Exception:
+            return "AUTO","AUTO",self.usuario
+
 class Ambiente:
     def __init__(self):
-        self.inicio_exec_sp=datetime.now(TZ)
-        self.data_exec=self.inicio_exec_sp.strftime("%Y-%m-%d")
-        self.hora_exec=self.inicio_exec_sp.strftime("%H:%M:%S")
+        self.inicio_exec_sp=INICIO_EXEC_SP
+        self.data_exec=DATA_EXEC
+        self.hora_exec=HORA_EXEC
         self.base_exec=Path.home()/"C6 CTVM LTDA, BANCO C6 S.A. e C6 HOLDING S.A"/"Mensageria e Cargas Operacionais - 11.CelulaPython"/"graciliano"/"automacoes"
         self.caminho_base=(self.base_exec/NOME_AUTOMACAO) if NOME_AUTOMACAO else self.base_exec
-        self.caminho_artefatos=self.caminho_base/STEM/self.inicio_exec_sp.strftime("%d.%m.%Y")
-        self.caminho_logs=self.caminho_base/"logs"/STEM/self.inicio_exec_sp.strftime("%d.%m.%Y")
-        self.caminho_input=self.caminho_base/"arquivos_input"/STEM
+        self.caminho_input=self.caminho_base/"arquivos input"/NOME_SCRIPT
+        self.caminho_logs=self.caminho_base/"logs"/NOME_SCRIPT/self.inicio_exec_sp.strftime("%Y-%m-%d")
+        self.caminho_artefatos=self.caminho_logs
         self.run_ts=self.inicio_exec_sp.strftime("%Y%m%d_%H%M%S")
         self.log_file_path=self.caminho_logs/f"{STEM}_{self.run_ts}.log"
         self.logger=self._criar_logger()
@@ -196,7 +232,7 @@ def garantir_outlook_aberto(amb:Ambiente)->bool:
 
 def enviar_email(amb:Ambiente,status:str,tempo_hms:str,tabelas:List[str],linhas:int,anexos:List[Path],resumo:Optional[dict])->None:
     st=(status or "").strip().upper()
-    subj=f"Célula Python Monitoração - {STEM} - {st}"
+    subj=f"CÉLULA PYTHON MONITORAÇÃO - {NOME_SCRIPT} - {st}"
     if st=="SUCESSO": dest=amb.dest_sucesso
     else: dest=ENVIAR_EMAIL_FALHA
     try:
@@ -215,18 +251,25 @@ def enviar_email(amb:Ambiente,status:str,tempo_hms:str,tabelas:List[str],linhas:
         except Exception:
             linhas_publico="-"
         tabelas_html="<br>".join(tabelas) if tabelas else "-"
+        linhas_processadas=int(linhas)
+        linhas_inseridas=int(resumo.get("linhas_persistidas",0) if resumo else 0)
+        linhas_ignoradas=max(linhas_processadas-linhas_inseridas,0)
+        hora_fim=datetime.now(TZ).strftime("%H:%M:%S")
         html=(
-            f"<html><body style='font-family:Arial,sans-serif'>"
-            f"<div style='padding:10px;border-left:6px solid {'#2e7d32' if st=='SUCESSO' else ('#f57c00' if st=='SEM DADOS PARA PROCESSAR' else '#c62828')};background:#fafafa;font-weight:600;margin-bottom:12px'>{st}</div>"
+            f"<html><body style=\"font-family:Montserrat,sans-serif;text-transform:uppercase\">"
+            f"<div style=\"padding:10px;border-left:6px solid {'#2e7d32' if st=='SUCESSO' else ('#f57c00' if st=='SEM DADOS PARA PROCESSAR' else '#c62828')};background:#fafafa;font-weight:600;margin-bottom:12px\">{st}</div>"
             f"<table cellpadding='6' style='border-collapse:collapse;font-size:14px'>"
-            f"<tr><td><b>Data:</b></td><td>{amb.data_exec}</td></tr>"
-            f"<tr><td><b>Hora início:</b></td><td>{amb.hora_exec}</td></tr>"
-            f"<tr><td><b>Tempo execução:</b></td><td>{tempo_hms}</td></tr>"
-            f"<tr><td><b>Projeto fonte:</b></td><td>{BQ_SOURCE_PROJECT_ID}</td></tr>"
-            f"<tr><td><b>Projeto billing:</b></td><td>{BQ_PROJECT_ID}</td></tr>"
-            f"<tr><td><b>Tabelas:</b></td><td>{tabelas_html}</td></tr>"
-            f"<tr><td><b>Linhas público:</b></td><td>{linhas_publico}</td></tr>"
-            f"<tr><td><b>Linhas processadas:</b></td><td>{linhas}</td></tr>"
+            f"<tr><td><b>AUTOMAÇÃO:</b></td><td>{NOME_AUTOMACAO}</td></tr>"
+            f"<tr><td><b>SCRIPT:</b></td><td>{NOME_SCRIPT}</td></tr>"
+            f"<tr><td><b>STATUS:</b></td><td>{st}</td></tr>"
+            f"<tr><td><b>HORA INICIO:</b></td><td>{amb.hora_exec}</td></tr>"
+            f"<tr><td><b>HORA FIM:</b></td><td>{hora_fim}</td></tr>"
+            f"<tr><td><b>TEMPO EXECUCAO:</b></td><td>{tempo_hms}</td></tr>"
+            f"<tr><td><b>LINHAS PROCESSADAS:</b></td><td>{linhas_processadas}</td></tr>"
+            f"<tr><td><b>LINHAS INSERIDAS:</b></td><td>{linhas_inseridas}</td></tr>"
+            f"<tr><td><b>LINHAS IGNORADAS (DUPLICADAS):</b></td><td>{linhas_ignoradas}</td></tr>"
+            f"<tr><td><b>TABELAS:</b></td><td>{tabelas_html}</td></tr>"
+            f"<tr><td><b>LINHAS PÚBLICO:</b></td><td>{linhas_publico}</td></tr>"
             f"</table></body></html>"
         )
         mail.HTMLBody=html
@@ -255,28 +298,6 @@ def enviar_email(amb:Ambiente,status:str,tempo_hms:str,tabelas:List[str],linhas:
             pythoncom.CoUninitialize()
         except Exception:
             pass
-
-def is_execucao_servidor()->bool:
-    return os.getenv("SERVIDOR_ORIGEM","").lower()==NOME_SERVIDOR.lower() or "--executado-por-servidor" in sys.argv
-
-def coletar_contexto_manual(amb:Ambiente)->Tuple[str,str,str]:
-    app=QApplication.instance() or QApplication(sys.argv)
-    dlg=QDialog(); dlg.setWindowTitle("Contexto de Execução")
-    layout=QVBoxLayout(dlg)
-    hb=QHBoxLayout(); layout.addLayout(hb)
-    hb.addWidget(QLabel("Modo:"))
-    cb=QComboBox(); cb.addItems(["AUTO","SOLICITACAO"]); hb.addWidget(cb)
-    layout.addWidget(QLabel("Observação:"))
-    le_obs=QLineEdit(); layout.addWidget(le_obs)
-    layout.addWidget(QLabel("Usuário (e-mail):"))
-    le_usr=QLineEdit(); le_usr.setText(amb.usuario); layout.addWidget(le_usr)
-    btn=QPushButton("OK"); btn.clicked.connect(dlg.accept); layout.addWidget(btn)
-    if not dlg.exec():
-        return "AUTO","AUTO",amb.usuario
-    modo=cb.currentText().upper()
-    obs="AUTO" if modo=="AUTO" else (le_obs.text().strip() or "Solicitacao da área")
-    usr=le_usr.text().strip() or amb.usuario
-    return modo,obs,usr
 
 def selecionar_data_especifica(amb:Ambiente)->Optional[str]:
     app=QApplication.instance() or QApplication(sys.argv)
@@ -546,7 +567,7 @@ def vincular_campanhas(amb:Ambiente,baixar:bool,data_corte:Optional[str])->tuple
         amb.logger.warning("Outlook poderá falhar")
     if not amb.cred_user or not amb.cred_pass:
         amb.logger.error("Credenciais ausentes no Dollynho")
-        return RET_FALHA,0,None,{"data_corte":data_corte,"vencimento":amb.last_vencimento,"bq_rows_corte":amb.last_rows_corte,"bq_rows_parcela":amb.last_rows_parcela,"campanhas_total":0,"campanhas_ok":0,"campanhas_ko":0,"linhas_persistidas":0,"tabela_destino":f"{BQ_PROJECT_ID}.ADMINISTRACAO_CELULA_PYTHON.VincularCampanhas"}
+        return RETCODE_FALHA,0,None,{"data_corte":data_corte,"vencimento":amb.last_vencimento,"bq_rows_corte":amb.last_rows_corte,"bq_rows_parcela":amb.last_rows_parcela,"campanhas_total":0,"campanhas_ok":0,"campanhas_ko":0,"linhas_persistidas":0,"tabela_destino":f"{BQ_PROJECT_ID}.ADMINISTRACAO_CELULA_PYTHON.VincularCampanhas"}
     df=pl.DataFrame()
     try:
         if baixar:
@@ -557,9 +578,9 @@ def vincular_campanhas(amb:Ambiente,baixar:bool,data_corte:Optional[str])->tuple
         amb.logger.info("Dados prontos: %d linhas", df.height)
     except Exception:
         amb.logger.error("Erro em baixar_dados", exc_info=True)
-        return RET_FALHA,0,None,{"data_corte":data_corte,"vencimento":amb.last_vencimento,"bq_rows_corte":amb.last_rows_corte,"bq_rows_parcela":amb.last_rows_parcela,"campanhas_total":0,"campanhas_ok":0,"campanhas_ko":0,"linhas_persistidas":0,"tabela_destino":f"{BQ_PROJECT_ID}.ADMINISTRACAO_CELULA_PYTHON.VincularCampanhas"}
+        return RETCODE_FALHA,0,None,{"data_corte":data_corte,"vencimento":amb.last_vencimento,"bq_rows_corte":amb.last_rows_corte,"bq_rows_parcela":amb.last_rows_parcela,"campanhas_total":0,"campanhas_ok":0,"campanhas_ko":0,"linhas_persistidas":0,"tabela_destino":f"{BQ_PROJECT_ID}.ADMINISTRACAO_CELULA_PYTHON.VincularCampanhas"}
     if df.height==0:
-        return RET_SEM_DADOS,0,None,{"data_corte":data_corte,"vencimento":amb.last_vencimento,"bq_rows_corte":amb.last_rows_corte,"bq_rows_parcela":0,"campanhas_total":0,"campanhas_ok":0,"campanhas_ko":0,"linhas_persistidas":0,"tabela_destino":f"{BQ_PROJECT_ID}.ADMINISTRACAO_CELULA_PYTHON.VincularCampanhas"}
+        return RETCODE_SEMDADOSPARAPROCESSAR,0,None,{"data_corte":data_corte,"vencimento":amb.last_vencimento,"bq_rows_corte":amb.last_rows_corte,"bq_rows_parcela":0,"campanhas_total":0,"campanhas_ok":0,"campanhas_ko":0,"linhas_persistidas":0,"tabela_destino":f"{BQ_PROJECT_ID}.ADMINISTRACAO_CELULA_PYTHON.VincularCampanhas"}
     anexos=[]
     resultados=[]; ok=0; ko=0
     try:
@@ -580,7 +601,7 @@ def vincular_campanhas(amb:Ambiente,baixar:bool,data_corte:Optional[str])->tuple
                 except Exception: pass
     except Exception:
         amb.logger.error("Falha Playwright", exc_info=True)
-        return RET_FALHA,0,None,{"data_corte":data_corte,"vencimento":amb.last_vencimento,"bq_rows_corte":amb.last_rows_corte,"bq_rows_parcela":int(df.height or 0),"campanhas_total":int(len(df.select(pl.col("CAMPAIGN_ID").unique()).to_series())),"campanhas_ok":ok,"campanhas_ko":ko,"linhas_persistidas":0,"tabela_destino":f"{BQ_PROJECT_ID}.ADMINISTRACAO_CELULA_PYTHON.VincularCampanhas"}
+        return RETCODE_FALHA,0,None,{"data_corte":data_corte,"vencimento":amb.last_vencimento,"bq_rows_corte":amb.last_rows_corte,"bq_rows_parcela":int(df.height or 0),"campanhas_total":int(len(df.select(pl.col("CAMPAIGN_ID").unique()).to_series())),"campanhas_ok":ok,"campanhas_ko":ko,"linhas_persistidas":0,"tabela_destino":f"{BQ_PROJECT_ID}.ADMINISTRACAO_CELULA_PYTHON.VincularCampanhas"}
     resultado=amb.caminho_artefatos/f"resultado_{amb.run_ts}.xlsx"
     amb.caminho_artefatos.mkdir(parents=True,exist_ok=True)
     pd.DataFrame(resultados).to_excel(resultado,index=False)
@@ -617,7 +638,7 @@ def vincular_campanhas(amb:Ambiente,baixar:bool,data_corte:Optional[str])->tuple
         amb.logger.error("Falha persistência BigQuery", exc_info=True)
         inserted=0
     resumo={"data_corte":data_corte,"vencimento":amb.last_vencimento,"bq_rows_corte":amb.last_rows_corte,"bq_rows_parcela":int(df.height or 0),"campanhas_total":int(len(df.select(pl.col("CAMPAIGN_ID").unique()).to_series())),"campanhas_ok":ok,"campanhas_ko":ko,"linhas_persistidas":int(inserted),"tabela_destino":f"{BQ_PROJECT_ID}.ADMINISTRACAO_CELULA_PYTHON.VincularCampanhas"}
-    return RET_SUCESSO,len(resultados),resultado if resultado.exists() else None,resumo
+    return RETCODE_SUCESSO,len(resultados),resultado if resultado.exists() else None,resumo
 
 def publicar_metricas(amb:Ambiente,status:str,tempo_hms:str,tabela_ref:str)->None:
     try:
@@ -643,20 +664,20 @@ def mover_artefatos(amb:Ambiente,arquivos:List[Path])->None:
 def main()->int:
     amb=Ambiente()
     amb.logger.info("INICIO | script=%s | automacao=%s", NOME_SCRIPT, NOME_AUTOMACAO or "-")
-    servidor=is_execucao_servidor()
-    if servidor:
+    execucao=Execucao()
+    if execucao.is_servidor():
         amb.modo_execucao="AUTO"; amb.observacao="AUTO"; amb.usuario=f"{getpass.getuser()}@c6bank.com"
         amb.logger.info("Execução identificada como servidor")
     else:
         amb.logger.info("Execução identificada como manual")
-        m,o,u=coletar_contexto_manual(amb); amb.modo_execucao=m; amb.observacao=o; amb.usuario=u
+        m,o,u=execucao.detectar(amb); amb.modo_execucao=m; amb.observacao=o; amb.usuario=u
     parser=argparse.ArgumentParser(add_help=False)
     parser.add_argument("command",nargs="?",choices=["vincular"],default="vincular")
     parser.add_argument("param",nargs="?")
     parser.add_argument("--no-baixar",action="store_false",dest="baixar")
     args,unknown=parser.parse_known_args()
     data_corte=args.param
-    if DATA_ESPECIFICA and not servidor:
+    if DATA_ESPECIFICA and not execucao.is_servidor():
         escolhida=selecionar_data_especifica(amb)
         if escolhida:
             data_corte=escolhida
@@ -665,20 +686,20 @@ def main()->int:
         status_code,total,resultado,resumo=vincular_campanhas(amb,baixar=args.baixar,data_corte=data_corte)
         tempo=amb.tempo_exec_hms()
         tabelas=[f"{BQ_SOURCE_PROJECT_ID}.SHARED_OPS.TB_DATA_CORTE_FATURAS",f"{BQ_SOURCE_PROJECT_ID}.SHARED_OPS.TB_PUBLICO_PARCELAMENTO_FATURA_PF",f"{BQ_PROJECT_ID}.ADMINISTRACAO_CELULA_PYTHON.VincularCampanhas"]
-        if status_code==RET_SEM_DADOS:
+        if status_code==RETCODE_SEMDADOSPARAPROCESSAR:
             enviar_email(amb,"SEM DADOS PARA PROCESSAR",tempo,tabelas,0,[resultado] if resultado else [],resumo)
             publicar_metricas(amb,"SEM DADOS PARA PROCESSAR",tempo,",".join(tabelas))
             mover_artefatos(amb,[resultado] if resultado else [])
-            return RET_SEM_DADOS
-        if status_code==RET_FALHA:
+            return RETCODE_SEMDADOSPARAPROCESSAR
+        if status_code==RETCODE_FALHA:
             enviar_email(amb,"FALHA",tempo,tabelas,0,[resultado] if resultado else [],resumo)
             publicar_metricas(amb,"FALHA",tempo,",".join(tabelas))
             mover_artefatos(amb,[resultado] if resultado else [])
-            return RET_FALHA
+            return RETCODE_FALHA
         enviar_email(amb,"SUCESSO",tempo,tabelas,total,[resultado] if resultado else [],resumo)
         publicar_metricas(amb,"SUCESSO",tempo,",".join(tabelas))
         mover_artefatos(amb,[resultado] if resultado else [])
-        return RET_SUCESSO
+        return RETCODE_SUCESSO
     except Exception:
         amb.logger.exception("Falha não tratada")
         try:
@@ -688,7 +709,7 @@ def main()->int:
             publicar_metricas(amb,"FALHA",tempo,",".join(tabelas))
         except Exception:
             pass
-        return RET_FALHA
+        return RETCODE_FALHA
     finally:
         try:
             if amb.log_file_path.exists():
