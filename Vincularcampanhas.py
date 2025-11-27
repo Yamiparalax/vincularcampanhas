@@ -1,9 +1,10 @@
 
-import sys, os, site, argparse, shutil, json, subprocess, logging, uuid, socket, getpass
+import sys, os, site, argparse, shutil, json, subprocess, logging, uuid, socket, getpass, threading
 from pathlib import Path
 from datetime import datetime, date, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, Any, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import pandas as pd
 import polars as pl
@@ -41,6 +42,7 @@ BQ_LOCATION = "US"
 RETCODE_SUCESSO = 0
 RETCODE_FALHA = 1
 RETCODE_SEMDADOSPARAPROCESSAR = 2
+LIMITE_ABAS = 5
 
 X_RD_LOGIN_USUARIO={"css":"#login"}
 X_RD_LOGIN_SENHA={"css":"#password"}
@@ -550,6 +552,46 @@ def rodar_campanha(amb:Ambiente,arquivo:str,cid:str,rd:Rundeck)->tuple[str,Optio
         if "SUCCEEDED" in str(status).upper():
             return status,logs
 
+def _rodar_campanha_worker(amb:Ambiente,cid:str,path_csv:Path)->dict:
+    try:
+        with sync_playwright() as pw:
+            context,page=criar_contexto(amb,pw)
+            try:
+                rd=Rundeck(amb,page)
+                status,logs=rodar_campanha(amb,str(path_csv),cid,rd)
+            finally:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+        return {"campaign_id":cid,"status":str(status).upper(),"log":logs or ""}
+    except Exception:
+        amb.logger.error("Falha ao processar campanha %s", cid, exc_info=True)
+        return {"campaign_id":cid,"status":"FALHA","log":""}
+
+def processar_campanhas_concorrentes(amb:Ambiente,df:pl.DataFrame,limite_abas:int)->Tuple[List[dict],int,int]:
+    campanhas=df["CAMPAIGN_ID"].unique().drop_nulls().to_list()
+    limite=max(1,min(limite_abas,len(campanhas)))
+    amb.logger.info("Processando campanhas com limite de %d abas", limite)
+    resultados=[]
+    ok=0
+    ko=0
+    lock=threading.Lock()
+    with ThreadPoolExecutor(max_workers=limite) as executor:
+        futuros=[]
+        for cid in campanhas:
+            path_csv=amb.caminho_input/f"{cid}.csv"
+            futuros.append(executor.submit(_rodar_campanha_worker,amb,str(cid),path_csv))
+        for fut in as_completed(futuros):
+            res=fut.result()
+            resultados.append(res)
+            with lock:
+                if res.get("status","").upper()=="SUCCEEDED":
+                    ok+=1
+                else:
+                    ko+=1
+    return resultados,ok,ko
+
 def remover_campanhas(amb:Ambiente,arquivo:str,rd:Rundeck)->None:
     amb.logger.info("Remoção campanhas")
     p=Path(arquivo) if arquivo else None
@@ -584,21 +626,7 @@ def vincular_campanhas(amb:Ambiente,baixar:bool,data_corte:Optional[str])->tuple
     anexos=[]
     resultados=[]; ok=0; ko=0
     try:
-        with sync_playwright() as pw:
-            context,page=criar_contexto(amb,pw)
-            try:
-                rd=Rundeck(amb,page)
-                campanhas=df["CAMPAIGN_ID"].unique().drop_nulls().to_list()
-                amb.logger.info("Campanhas: %s", campanhas)
-                for cid in campanhas:
-                    path_csv=amb.caminho_input/f"{cid}.csv"
-                    status,logs=rodar_campanha(amb,str(path_csv),str(cid),rd)
-                    resultados.append({"campaign_id":str(cid),"status":str(status).upper(),"log":logs or ""})
-                    if str(status).upper()=="SUCCEEDED": ok+=1
-                    else: ko+=1
-            finally:
-                try: context.close()
-                except Exception: pass
+        resultados,ok,ko=processar_campanhas_concorrentes(amb,df,int(os.getenv("LIMITE_ABAS",LIMITE_ABAS)))
     except Exception:
         amb.logger.error("Falha Playwright", exc_info=True)
         return RETCODE_FALHA,0,None,{"data_corte":data_corte,"vencimento":amb.last_vencimento,"bq_rows_corte":amb.last_rows_corte,"bq_rows_parcela":int(df.height or 0),"campanhas_total":int(len(df.select(pl.col("CAMPAIGN_ID").unique()).to_series())),"campanhas_ok":ok,"campanhas_ko":ko,"linhas_persistidas":0,"tabela_destino":f"{BQ_PROJECT_ID}.ADMINISTRACAO_CELULA_PYTHON.VincularCampanhas"}
